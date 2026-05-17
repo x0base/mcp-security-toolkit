@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-security-toolkit"
-version = "0.3.0"
+version = "0.3.1"
 description = "Atomic MCP tools for AppSec and AI Security engineers"
 readme = "README.md"
 license = { text = "MIT" }
@@ -25,11 +25,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# NOTE: dev dependencies intentionally have lower bounds only.
+# These are not shipped to end users (live under `[dev]` extras); the CI
+# matrix on Python 3.10–3.13 × Ubuntu/macOS is the source of truth for
+# compatibility. Upper bounds here would only create Dependabot toil
+# without supply-chain benefit. Runtime deps above DO have upper bounds.
 dev = [
-    "pytest>=8.0,<9.0",
-    "pytest-asyncio>=0.23,<1.0",
-    "ruff>=0.6,<1.0",
-    "mypy>=1.10,<2.0",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.10",
 ]
 
 [project.scripts]

@@ -15,6 +15,14 @@ If you're building an MCP tool and an `mcp_server_audit` finding points
 at your code, the corresponding helper here is the one-line fix.
 """
 
+from mcp_security_toolkit.helpers.eval_expr import (
+    UnsafeExpression,
+    evaluate_expression,
+)
+from mcp_security_toolkit.helpers.filenames import (
+    UnsafeFilename,
+    safe_filename,
+)
 from mcp_security_toolkit.helpers.paths import (
     PathOutsideRoot,
     safe_path,
@@ -32,8 +40,12 @@ from mcp_security_toolkit.helpers.urls import (
 __all__ = [
     "BlockedAddress",
     "PathOutsideRoot",
+    "UnsafeExpression",
+    "UnsafeFilename",
     "UnsafeIdentifier",
     "UnsafeURL",
+    "evaluate_expression",
+    "safe_filename",
     "safe_path",
     "safe_sql_identifier",
     "safe_url",

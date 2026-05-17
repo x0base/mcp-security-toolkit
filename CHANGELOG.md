@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — defensive helpers complete + dev-dep policy
+
+Patch release. Completes the defensive-helpers library (`safe_filename`,
+`evaluate_expression`) and changes the dev-dependency upper-bound policy.
+
+### Added
+- `safe_filename(name)` — basename-only validator. Rejects `/`, `\`,
+  control characters, traversal tokens, Windows reserved device names.
+  Fixes the case where an MCP tool accepts a filename and joins it to
+  its own directory.
+- `evaluate_expression(expr, variables=None)` — safe arithmetic-only
+  expression evaluator (AST whitelist: binary/unary/bool/compare ops,
+  ternary, names from `variables`, calls to a small builtin whitelist
+  `abs / min / max / round / len / int / float / bool / sum`). Use
+  instead of `eval()` in MCP tools that need user-supplied formulas /
+  thresholds. Caps expression length and `**` exponent to bound CPU.
+
+### Changed
+- Dev-dependency upper bounds removed from `pyproject.toml`. Rationale:
+  dev deps are not shipped to end users; CI on Python 3.10–3.13 ×
+  Ubuntu/macOS is the source of truth for compatibility. Runtime deps
+  (`mcp`, `pydantic`) keep their tight upper bounds.
+
 ## [0.3.0] — security hardening, MCP-specific detectors, ecosystem features
 
 Major release. Addresses findings from an external code/product audit,

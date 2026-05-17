@@ -252,7 +252,9 @@ package is the inverse: drop-in primitives an MCP author imports to make
 their tools safe by construction.
 
 ```python
-from mcp_security_toolkit.helpers import safe_path, safe_url, safe_sql_identifier
+from mcp_security_toolkit.helpers import (
+    safe_path, safe_filename, safe_url, safe_sql_identifier, evaluate_expression,
+)
 
 @mcp.tool()
 def read_log(name: str) -> str:
@@ -260,8 +262,14 @@ def read_log(name: str) -> str:
     return p.read_text()
 
 @mcp.tool()
+def save_upload(filename: str, data: bytes) -> str:
+    name = safe_filename(filename)                          # basename-only
+    (Path("/var/uploads") / name).write_bytes(data)
+    return name
+
+@mcp.tool()
 def fetch_url(url: str) -> str:
-    url = safe_url(url)                                    # blocks SSRF
+    url = safe_url(url)                                     # blocks SSRF
     return httpx.get(url, timeout=5).text
 
 ALLOWED_TABLES = {"users", "orders", "events"}
@@ -270,6 +278,10 @@ ALLOWED_TABLES = {"users", "orders", "events"}
 def count_rows(table: str) -> int:
     table = safe_sql_identifier(table, allow=ALLOWED_TABLES)
     return db.execute(f"SELECT COUNT(*) FROM {table}").scalar()
+
+@mcp.tool()
+def evaluate_formula(expr: str, price: float, qty: int) -> float:
+    return evaluate_expression(expr, variables={"price": price, "qty": qty})
 ```
 
 Pure functions, no I/O, no globals. Each fixes the corresponding
