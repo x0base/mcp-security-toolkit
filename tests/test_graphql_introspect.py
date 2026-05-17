@@ -67,6 +67,61 @@ def test_network_error_propagates():
     assert "timed out" in r["error"]
 
 
+def test_blocks_private_ip_by_default():
+    with patch.object(mod, "_is_private_address", return_value=(True, "10.0.0.1")):
+        r = mod.graphql_introspect("https://internal.local/graphql")
+    assert r["error"] == "blocked-private-address"
+    assert r["resolved_ip"] == "10.0.0.1"
+
+
+def test_allow_private_opt_in():
+    with patch.object(mod, "_is_private_address", return_value=(True, "10.0.0.1")), \
+         patch.object(mod, "_post", return_value=_stub_response(_schema(queries=[], types=[]))):
+        r = mod.graphql_introspect("https://internal.local/graphql", allow_private=True)
+    assert "error" not in r or r.get("error") is None
+    assert r["introspection_enabled"] is True
+
+
+def test_timeout_is_clamped():
+    with patch.object(mod, "_is_private_address", return_value=(False, "1.2.3.4")), \
+         patch.object(mod, "_post", return_value=_stub_response(_schema(queries=[], types=[]))) as p:
+        mod.graphql_introspect("https://api.example.com/graphql", timeout=600.0)
+    # second positional arg to _post is payload; timeout is third
+    args, kwargs = p.call_args
+    timeout = args[2] if len(args) > 2 else kwargs.get("timeout")
+    assert timeout <= 60.0
+
+
+def test_missing_hostname():
+    r = mod.graphql_introspect("https:///graphql")
+    assert "error" in r
+
+
+def test_response_body_cap():
+    # Simulate _post returning the cap-exceeded sentinel; ensure it surfaces cleanly.
+    with patch.object(mod, "_is_private_address", return_value=(False, "1.2.3.4")), \
+         patch.object(mod, "_post", return_value=(200, None, "response-too-large (>5242880 bytes)")):
+        r = mod.graphql_introspect("https://api.example.com/graphql")
+    assert r["introspection_enabled"] is False
+    assert "response-too-large" in r["error"]
+
+
+def test_no_redirect_handler_raises_on_3xx():
+    # _NoRedirectHandler should turn any 3xx into an HTTPError; verify the
+    # handler exists and its methods refuse the redirect.
+    import urllib.error
+    import urllib.request
+
+    handler = mod._NoRedirectHandler()
+    req = urllib.request.Request("https://example.com/q")
+    try:
+        handler.http_error_302(req, None, 302, "Found", {})
+    except urllib.error.HTTPError as e:
+        assert "redirects disabled" in str(e).lower()
+    else:
+        raise AssertionError("expected HTTPError")
+
+
 def test_sample_lists_truncated():
     queries = [f"q{i}" for i in range(100)]
     types = [{"name": "Query", "kind": "OBJECT", "fields": [{"name": n} for n in queries]}]

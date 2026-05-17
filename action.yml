@@ -1,0 +1,106 @@
+name: "MCP Security Toolkit"
+description: "Heuristic audit of an MCP server's Python source. Emits SARIF 2.1.0 for GitHub Code Scanning."
+author: "x0base"
+branding:
+  icon: "shield"
+  color: "red"
+
+inputs:
+  path:
+    description: "Path to the MCP server Python file to audit (relative to repo root)."
+    required: true
+  python-version:
+    description: "Python version to run the audit under."
+    required: false
+    default: "3.12"
+  upload-sarif:
+    description: "If true, upload the SARIF report to GitHub Code Scanning."
+    required: false
+    default: "true"
+  fail-on-severity:
+    description: "Fail the action if any finding at this severity or higher is reported. One of: high, medium, low, never."
+    required: false
+    default: "high"
+
+outputs:
+  sarif-path:
+    description: "Filesystem path to the generated SARIF document."
+    value: ${{ steps.audit.outputs.sarif_path }}
+  high-findings:
+    description: "Number of `high` severity findings."
+    value: ${{ steps.audit.outputs.high }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install mcp-security-toolkit
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install mcp-security-toolkit
+
+    - id: audit
+      name: Run mcp_server_audit and emit SARIF
+      shell: bash
+      env:
+        TARGET_PATH: ${{ inputs.path }}
+        FAIL_ON: ${{ inputs.fail-on-severity }}
+      run: |
+        python - <<'PY'
+        import json, os, sys
+        from pathlib import Path
+        from mcp_security_toolkit.tools.mcp_server_audit import mcp_server_audit
+        from mcp_security_toolkit.sarif import to_sarif
+
+        target = os.environ["TARGET_PATH"]
+        fail_on = os.environ.get("FAIL_ON", "high").lower()
+
+        report = mcp_server_audit(target)
+        if "error" in report and "tools_found" not in report:
+            print(f"::error file={target}::{report['error']}")
+            sys.exit(1)
+
+        sarif = to_sarif(report)
+        out_path = Path("mcp-security-toolkit.sarif")
+        out_path.write_text(json.dumps(sarif, indent=2))
+
+        summary = report.get("summary", {})
+        h, m, lo = summary.get("high", 0), summary.get("medium", 0), summary.get("low", 0)
+
+        gh_out = os.environ.get("GITHUB_OUTPUT")
+        if gh_out:
+            with open(gh_out, "a") as f:
+                f.write(f"sarif_path={out_path}\n")
+                f.write(f"high={h}\nmedium={m}\nlow={lo}\n")
+
+        # GitHub annotation for each finding
+        for t in report.get("tools", []):
+            for fnd in t.get("findings", []):
+                lvl = {"high": "error", "medium": "warning", "low": "notice", "info": "notice"}.get(
+                    fnd.get("severity", "info"), "notice"
+                )
+                line = fnd.get("line") or t.get("line") or 1
+                msg = f"[{t.get('name')}] {fnd.get('category')}: {fnd.get('message')}"
+                print(f"::{lvl} file={target},line={line}::{msg}")
+
+        thresholds = {"high": h, "medium": m, "low": lo}
+        if fail_on != "never":
+            order = ["high", "medium", "low"]
+            for sev in order[:order.index(fail_on) + 1]:
+                if thresholds.get(sev, 0) > 0:
+                    print(f"::error::fail-on-severity={fail_on} triggered "
+                          f"({sev}={thresholds[sev]})")
+                    sys.exit(2)
+        PY
+
+    - name: Upload SARIF to GitHub Code Scanning
+      if: inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.audit.outputs.sarif_path }}
+        category: mcp-security-toolkit

@@ -85,3 +85,110 @@ def test_from_import_renamed_resolves_os_system():
     t2 = next(t for t in report["tools"] if t["name"] == "t2")
     cats = {f["category"] for f in t2["findings"]}
     assert "shell-exec" in cats
+
+
+def test_max_bytes_blocks_huge_input(tmp_path):
+    big = tmp_path / "big.py"
+    big.write_text("x = 1\n" * 100_000)  # ~600 KB
+    r = mcp_server_audit(str(big), max_bytes=1000)
+    assert r["error"] == "input-too-large"
+    assert r["max_bytes"] == 1000
+    assert r["bytes"] > 1000
+
+
+def test_coverage_block_present():
+    r = mcp_server_audit(str(FIXTURE))
+    cov = r["coverage"]
+    assert cov["decorator_tools_found"] == 4
+    assert cov["imperative_tools_resolved"] == 0
+    assert cov["imperative_tools_external"] == 0
+
+
+def test_limitations_present():
+    r = mcp_server_audit(str(FIXTURE))
+    assert isinstance(r["limitations"], list)
+    assert len(r["limitations"]) >= 3
+    assert any("heuristic" in lim.lower() for lim in r["limitations"])
+
+
+def test_bytes_read_recorded():
+    r = mcp_server_audit(str(FIXTURE))
+    assert r["bytes_read"] > 0
+
+
+# ── v0.4 detector tests ────────────────────────────────────────────────────
+
+V0_4 = Path(__file__).parent / "fixtures" / "v0_4"
+
+
+def test_d1_path_traversal_positive():
+    r = mcp_server_audit(str(V0_4 / "path_traversal_positive.py"))
+    all_cats = [f["category"] for t in r["tools"] for f in t["findings"]]
+    assert "path-traversal" in all_cats
+
+
+def test_d1_path_traversal_negative():
+    r = mcp_server_audit(str(V0_4 / "path_traversal_negative.py"))
+    all_cats = [f["category"] for t in r["tools"] for f in t["findings"]]
+    assert "path-traversal" not in all_cats
+
+
+def test_d2_tool_description_injection_positive():
+    r = mcp_server_audit(str(V0_4 / "tool_desc_injection_positive.py"))
+    all_cats = [f["category"] for t in r["tools"] for f in t["findings"]]
+    assert "tool-description-injection" in all_cats
+    finding = next(
+        f for t in r["tools"] for f in t["findings"]
+        if f["category"] == "tool-description-injection"
+    )
+    assert finding["severity"] == "medium"
+
+
+def test_d3_ssrf_positive():
+    r = mcp_server_audit(str(V0_4 / "ssrf_positive.py"))
+    all_cats = [f["category"] for t in r["tools"] for f in t["findings"]]
+    assert "ssrf" in all_cats
+    finding = next(
+        f for t in r["tools"] for f in t["findings"]
+        if f["category"] == "ssrf"
+    )
+    assert finding["severity"] == "high"
+
+
+def test_d3_ssrf_negative():
+    r = mcp_server_audit(str(V0_4 / "ssrf_negative.py"))
+    all_cats = [f["category"] for t in r["tools"] for f in t["findings"]]
+    assert "ssrf" not in all_cats
+
+
+def test_d4_uri_sqli_positive():
+    r = mcp_server_audit(str(V0_4 / "mcp_uri_sqli_positive.py"))
+    all_cats = [f["category"] for t in r["tools"] for f in t["findings"]]
+    assert "mcp-resource-uri-sqli" in all_cats
+    finding = next(
+        f for t in r["tools"] for f in t["findings"]
+        if f["category"] == "mcp-resource-uri-sqli"
+    )
+    assert finding["severity"] == "high"
+
+
+def test_d4_uri_sqli_negative():
+    r = mcp_server_audit(str(V0_4 / "mcp_uri_sqli_negative.py"))
+    all_cats = [f["category"] for t in r["tools"] for f in t["findings"]]
+    assert "mcp-resource-uri-sqli" not in all_cats
+
+
+def test_d5_tool_shadowing_positive():
+    r = mcp_server_audit(str(V0_4 / "tool_shadowing_positive.py"))
+    file_cats = [f["category"] for f in r["file_level_findings"]]
+    assert "tool-shadowing" in file_cats
+    findings = [f for f in r["file_level_findings"] if f["category"] == "tool-shadowing"]
+    assert len(findings) >= 2
+
+
+def test_detectors_run_populated():
+    r = mcp_server_audit(str(FIXTURE))
+    assert "path-traversal" in r["coverage"]["detectors_run"]
+    assert "tool-shadowing" in r["coverage"]["detectors_run"]
+    assert "ssrf" in r["coverage"]["detectors_run"]
+    assert "mcp-resource-uri-sqli" in r["coverage"]["detectors_run"]

@@ -33,6 +33,7 @@ mcp.tool()(graphql_introspect.graphql_introspect)
 mcp.tool()(phpggc_generate.phpggc_generate)
 mcp.tool()(interactsh.interactsh_register)
 mcp.tool()(interactsh.interactsh_poll)
+mcp.tool()(interactsh.interactsh_stop)
 
 
 def main() -> None:

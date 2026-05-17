@@ -58,6 +58,29 @@ def test_expired_token():
     assert any(f["category"] == "expired" for f in r["findings"])
 
 
+def test_weak_secret_check_scope_present():
+    r = jwt_inspect("eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.", check_weak_secrets=False)
+    assert "weak_secret_check_scope" in r
+    assert "absence" in r["weak_secret_check_scope"].lower()
+
+
+def test_weak_secret_check_performed_true_for_hs():
+    token = _make_jwt(
+        {"alg": "HS256"},
+        {"sub": "x", "exp": int(time.time()) + 60, "iat": int(time.time()), "iss": "a", "aud": "b"},
+        secret="not-in-dict-zzz-9999",
+    )
+    r = jwt_inspect(token)
+    assert r["weak_secret_check_performed"] is True
+    assert r["weak_secret"] is None
+
+
+def test_weak_secret_check_skipped_when_disabled():
+    token = _make_jwt({"alg": "HS256"}, {"sub": "x"}, secret="zzz")
+    r = jwt_inspect(token, check_weak_secrets=False)
+    assert r["weak_secret_check_performed"] is False
+
+
 def test_suspicious_kid():
     token = _make_jwt(
         {"alg": "HS256", "kid": "../../etc/passwd"},

@@ -32,11 +32,26 @@ instead of five.
 
 ### `mcp_server_audit`
 Heuristic AST audit of an MCP server's Python source. Enumerates
-`@tool`-decorated and imperatively-registered tools, then flags:
-shell execution, filesystem writes, network egress, code injection,
-over-broad parameter types, ambiguous/short descriptions, secrets read
-from env. Tracks `from X import Y [as Z]` aliases so renamed dangerous
-imports don't slip through.
+`@tool`-decorated and imperatively-registered tools, then runs 13 detectors:
+
+| Detector | Category | Sev |
+|---|---|---|
+| Shell execution | `shell-exec` | high |
+| Filesystem write/delete | `fs-write` / `fs-destructive` | med–high |
+| Network egress | `network-egress` | medium |
+| Code injection | `code-injection` | high |
+| Over-broad params | `over-broad-param` | medium |
+| Ambiguous/missing docstring | `ambiguous-description` | low–med |
+| Secret read from env | `secret-in-env` | info |
+| **Path traversal** (v0.4) | `path-traversal` | high |
+| **Prompt injection in docstring** (v0.4) | `tool-description-injection` | medium |
+| **SSRF via URL param** (v0.4) | `ssrf` | high |
+| **Resource URI → SQL injection** (v0.4) | `mcp-resource-uri-sqli` | high |
+| **Tool shadowing** (v0.4) | `tool-shadowing` | medium |
+
+Tracks `from X import Y [as Z]` aliases so renamed dangerous imports
+don't slip through. Reports include a `coverage.detectors_run` list and
+`limitations` — absence of finding is NOT proof of safety.
 
 Complements Snyk / Invariant Labs `mcp-scan`, which audits MCP configs
 and tool descriptions — this audits the *source code* of the server.
@@ -83,8 +98,10 @@ tool is one input → one output, no chaining.
   security observations
 - `phpggc_generate` — wraps `phpggc` CLI for PHP-deserialization gadget
   chains (graceful if binary missing)
-- `interactsh_register` / `interactsh_poll` — wraps `interactsh-client`
-  CLI for OOB callback URL capture (blind SSRF / XXE / RCE confirmation)
+- `interactsh_register` / `interactsh_poll` / `interactsh_stop` —
+  wraps `interactsh-client` CLI for OOB callback URL capture (blind SSRF /
+  XXE / RCE confirmation). `_stop` terminates and cleans up the session;
+  TTL gc runs on every register
 
 ## Example output
 
@@ -226,6 +243,84 @@ calls two of them):
 ```bash
 python scripts/smoke_mcp.py
 ```
+
+## Defensive helpers — fix what we detect
+
+The tools above **find** unsafe patterns in MCP servers. The
+[`mcp_security_toolkit.helpers`](./src/mcp_security_toolkit/helpers/)
+package is the inverse: drop-in primitives an MCP author imports to make
+their tools safe by construction.
+
+```python
+from mcp_security_toolkit.helpers import safe_path, safe_url, safe_sql_identifier
+
+@mcp.tool()
+def read_log(name: str) -> str:
+    p = safe_path(name, root="/var/log/myapp", must_exist=True)
+    return p.read_text()
+
+@mcp.tool()
+def fetch_url(url: str) -> str:
+    url = safe_url(url)                                    # blocks SSRF
+    return httpx.get(url, timeout=5).text
+
+ALLOWED_TABLES = {"users", "orders", "events"}
+
+@mcp.tool()
+def count_rows(table: str) -> int:
+    table = safe_sql_identifier(table, allow=ALLOWED_TABLES)
+    return db.execute(f"SELECT COUNT(*) FROM {table}").scalar()
+```
+
+Pure functions, no I/O, no globals. Each fixes the corresponding
+`mcp_server_audit` finding category in one line.
+
+## GitHub Action
+
+Drop into any repo to run `mcp_server_audit` in CI, upload SARIF to the
+Security tab, and fail the build on configured severity:
+
+```yaml
+# .github/workflows/mcp-audit.yml
+on: [push, pull_request]
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: x0base/mcp-security-toolkit@v0.3
+        with:
+          path: src/my_mcp_server.py
+          fail-on-severity: high
+```
+
+## CLI
+
+```bash
+# Default (no args): start the MCP stdio server — what your client config invokes
+mcp-security-toolkit
+
+# Audit every MCP server your local Claude / Cursor / Claude Desktop is configured to launch
+mcp-security-toolkit scan-installed
+mcp-security-toolkit scan-installed --sarif > findings.sarif
+
+# Zero-install run, via uv
+uvx mcp-security-toolkit scan-installed
+```
+
+## Treat tool outputs as untrusted data
+
+Some tools return content from attacker-controlled sources: `http_diff`
+quotes target response bodies, `interactsh_poll` returns raw OOB requests,
+`graphql_introspect` returns target-controlled schema names. If such a
+string contains *"ignore previous instructions..."*, an LLM agent reading
+it may follow the embedded instruction — classic indirect prompt
+injection. MCP clients should render tool outputs inside delimiters
+(`<tool_output>...`) and not flow them silently into the next prompt.
+See [THREAT_MODEL.md](./THREAT_MODEL.md#tool-outputs-are-untrusted-data).
 
 ## Non-goals
 

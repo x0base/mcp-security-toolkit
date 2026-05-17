@@ -41,6 +41,11 @@ class JwtInspection(BaseModel):
     signature_b64: str | None = None
     findings: list[JwtFinding] = Field(default_factory=list)
     weak_secret: str | None = None
+    weak_secret_check_performed: bool = False
+    weak_secret_check_scope: str = (
+        f"small_builtin_dictionary ({len(DEFAULT_WEAK_SECRETS)} entries) — "
+        "absence of finding is NOT proof of strong secret"
+    )
 
 
 def _b64url_decode(seg: str) -> bytes:
@@ -183,7 +188,8 @@ def jwt_inspect(token: str, check_weak_secrets: bool = True) -> dict:
             )
         )
 
-    if check_weak_secrets:
+    if check_weak_secrets and alg in HS_ALGS:
+        result.weak_secret_check_performed = True
         weak = _try_weak_secret(token, alg, DEFAULT_WEAK_SECRETS)
         if weak:
             result.weak_secret = weak

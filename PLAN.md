@@ -33,8 +33,9 @@ Atomic primitives for authorized AppSec / pentest workflows.
 | `wordlist_gen` | ✅ shipped | Payloads | `passwords` / `usernames` / `subdomains` modes. |
 | `graphql_introspect` | ✅ shipped | Recon | Single introspection POST → schema summary + security observations. |
 | `phpggc_generate` | ✅ shipped | Payloads | Wraps `phpggc` CLI; graceful if binary missing. |
-| `interactsh_register` | ✅ shipped | OOB | Wraps `interactsh-client` CLI; spawns detached, returns callback URL + token. |
-| `interactsh_poll` | ✅ shipped | OOB | Reads captured DNS/HTTP/SMTP interactions for a token. |
+| `interactsh_register` | ✅ shipped | OOB | Wraps `interactsh-client` CLI; spawns detached, returns callback URL + token. TTL gc on each register, 0600 perms on session/log files. |
+| `interactsh_poll` | ✅ shipped | OOB | Reads captured DNS/HTTP/SMTP interactions for a token (log read capped at 1 MB). |
+| `interactsh_stop` | ✅ shipped (v0.3) | OOB | Terminates the session, removes log + session descriptor. Refuses to unlink paths outside sessions dir. |
 
 ## Explicitly NOT shipping
 
@@ -47,7 +48,26 @@ them as recommended companions.
   (complementary to our source-level audit)
 - Full 27-tool CVE intelligence → use **mukul975/cve-mcp-server**
 
-## v0.3 — backlog
+## v0.3 — security hardening (shipped)
+
+Response to external audit. No new feature surface; hardens what's there.
+
+- `mcp_server_audit`: `max_bytes` input cap (default 5 MB), `coverage` and
+  `limitations` blocks in every report.
+- `graphql_introspect`: SSRF protection — blocks private / loopback /
+  link-local / multicast / cloud-metadata addresses by default
+  (`allow_private=True` to opt in); redirects disabled; timeout clamped.
+- `jwt_inspect`: `weak_secret_check_performed` and
+  `weak_secret_check_scope` make dictionary-check scope explicit.
+- `interactsh`: new `_stop` tool; strict 12-hex token regex; resolve-based
+  boundary check on session paths (refuses to unlink anything outside
+  sessions dir); session/log files 0600, sessions dir 0700; TTL gc on
+  every register; log read cap at 1 MB.
+- `phpggc_generate`: opt-in via `MCP_SECURITY_TOOLKIT_ENABLE_OFFENSIVE=1`.
+- Supply chain: runtime deps with upper bounds; Dependabot for GitHub
+  Actions and pip.
+
+## v0.4 — backlog
 
 Candidate additions, ordered by demand signal we expect:
 

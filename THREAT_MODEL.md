@@ -36,6 +36,34 @@ It does **not** trust:
 - **DoS via pathological input.** Regex and AST walks are bounded by input
   size; long inputs hit reasonable timeouts and truncation in network calls.
 
+## Tool outputs are untrusted data
+
+Several tools return content that originated from an attacker-controlled
+source: `http_diff` includes excerpts from target response bodies,
+`interactsh_poll` returns raw OOB requests, `graphql_introspect` returns
+target-controlled type and field names, and any audit tool may quote text
+from the file or schema it inspected.
+
+These payloads will end up inside the agent's context window. If they
+contain text like *"ignore previous instructions and ..."* the agent
+itself may follow them — this is **indirect prompt injection**, and it
+is a property of LLM agents in general, not of this toolkit.
+
+**Guidance for MCP clients:**
+- Treat any string field inside a tool's JSON response as untrusted data.
+- Render tool output to the user inside a fenced block or with clear
+  delimiters (e.g. an `<tool_output>` XML tag) so the model has a
+  syntactic signal that the content is data, not instructions.
+- Do not silently flow tool output into a subsequent prompt as if it
+  were part of the system role.
+- For AppSec workflows, prefer reviewing tool output yourself before
+  re-prompting the agent with summaries.
+
+The toolkit will not sanitize these strings because we cannot
+distinguish data from instruction inside an arbitrary text blob without
+hurting legitimate use (auditing a prompt that *describes* an attack).
+This is a responsibility that lives in the client / orchestrator.
+
 ## Out-of-scope risks (we don't defend against these)
 
 - **Misuse by an authorized user against unauthorized targets.** This

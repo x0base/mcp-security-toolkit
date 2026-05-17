@@ -36,6 +36,34 @@ from pydantic import BaseModel, Field
 SESSIONS_DIR = Path(tempfile.gettempdir()) / "mcp_security_toolkit_interactsh"
 URL_REGEX = re.compile(r"([a-z0-9]+\.(?:oast\.|interact\.).+?)(?:\s|$)", re.IGNORECASE)
 
+# Matches exactly what `uuid.uuid4().hex[:12]` produces. Strict.
+TOKEN_REGEX = re.compile(r"^[a-f0-9]{12}$")
+
+# Conservative hostname/IP shape: letters, digits, dot, hyphen, underscore,
+# colon (for IPv6 / port). Rejects values starting with `-` (would be parsed
+# as a flag by the interactsh-client CLI) and any shell metacharacters.
+SERVER_REGEX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,253}$")
+
+DEFAULT_TTL_SECONDS = 3600  # 1 hour
+DEFAULT_MAX_LOG_BYTES = 1024 * 1024  # 1 MB
+
+
+def _validate_token(token: str) -> bool:
+    return isinstance(token, str) and bool(TOKEN_REGEX.match(token))
+
+
+def _validate_server(server: str) -> bool:
+    return isinstance(server, str) and bool(SERVER_REGEX.match(server))
+
+
+def _path_is_inside(child: Path, parent: Path) -> bool:
+    """True iff resolved `child` is at or below resolved `parent`."""
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
 
 class RegisterReport(BaseModel):
     available: bool
@@ -65,7 +93,53 @@ class PollReport(BaseModel):
 
 def _session_path(token: str) -> Path:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(SESSIONS_DIR, 0o700)
+    except OSError:
+        pass
     return SESSIONS_DIR / f"{token}.json"
+
+
+def _secure_write(path: Path, content: str) -> None:
+    """Write file with 0600 perms atomically — no world-readable window."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(str(path), flags, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+    # If the file pre-existed with looser perms, `os.open` does NOT change
+    # them — normalize explicitly.
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _gc_old_sessions(ttl_seconds: int = DEFAULT_TTL_SECONDS) -> int:
+    """Sweep sessions whose started+ttl is in the past. Returns count removed."""
+    if not SESSIONS_DIR.exists():
+        return 0
+    cutoff = time.time() - ttl_seconds
+    removed = 0
+    for sf in SESSIONS_DIR.glob("*.json"):
+        try:
+            session = json.loads(sf.read_text())
+            if session.get("started", 0) < cutoff:
+                # try to stop the process if still running
+                pid = session.get("pid")
+                if isinstance(pid, int) and pid > 0:
+                    try:
+                        os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+                log = Path(session.get("log_path", ""))
+                # Defense in depth: same boundary check as poll/stop.
+                if log.exists() and _path_is_inside(log, SESSIONS_DIR):
+                    log.unlink(missing_ok=True)
+                sf.unlink(missing_ok=True)
+                removed += 1
+        except (OSError, json.JSONDecodeError):
+            continue
+    return removed
 
 
 def interactsh_register(server: str = "interact.sh", timeout: float = 8.0) -> dict:
@@ -82,6 +156,12 @@ def interactsh_register(server: str = "interact.sh", timeout: float = 8.0) -> di
     Returns:
         RegisterReport with `callback_url` and `token`.
     """
+    if not _validate_server(server):
+        return RegisterReport(
+            available=False, server=str(server),
+            error="invalid server value (expected hostname/IP, alnum + . _ - : only)",
+        ).model_dump()
+
     bin_path = shutil.which("interactsh-client")
     if not bin_path:
         return RegisterReport(
@@ -89,10 +169,16 @@ def interactsh_register(server: str = "interact.sh", timeout: float = 8.0) -> di
             error="interactsh-client not found on PATH — install from https://github.com/projectdiscovery/interactsh",
         ).model_dump()
 
+    _gc_old_sessions()
+
     token = uuid.uuid4().hex[:12]
-    log_path = SESSIONS_DIR / f"{token}.log"
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    log_path.write_text("")
+    try:
+        os.chmod(SESSIONS_DIR, 0o700)
+    except OSError:
+        pass
+    log_path = SESSIONS_DIR / f"{token}.log"
+    _secure_write(log_path, "")
 
     args = [bin_path, "-s", server, "-json", "-o", str(log_path)]
     try:
@@ -130,7 +216,7 @@ def interactsh_register(server: str = "interact.sh", timeout: float = 8.0) -> di
             error="interactsh-client did not emit a callback URL within timeout",
         ).model_dump()
 
-    _session_path(token).write_text(json.dumps({
+    _secure_write(_session_path(token), json.dumps({
         "server": server,
         "callback_url": callback_url,
         "pid": proc.pid,
@@ -153,19 +239,31 @@ def interactsh_poll(token: str) -> dict:
     Returns:
         PollReport with all interactions captured so far.
     """
-    if not isinstance(token, str) or not token.strip():
-        return {"error": "token must be a non-empty string"}
+    if not _validate_token(token):
+        return {"error": "invalid token format (expected 12 hex chars from interactsh_register)"}
 
     sp = _session_path(token)
     if not sp.exists():
         return {"error": f"unknown token: {token}"}
 
-    session = json.loads(sp.read_text())
-    log_path = Path(session["log_path"])
+    try:
+        session = json.loads(sp.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        return {"error": f"failed to read session: {e}"}
+    log_path = Path(str(session.get("log_path", "")))
+    if not _path_is_inside(log_path, SESSIONS_DIR):
+        return {"error": "session log_path escaped sessions dir — possible tampering"}
     interactions: list[Interaction] = []
 
     if log_path.exists():
-        for line in log_path.read_text().splitlines():
+        # cap to avoid pathological allocations on huge logs
+        try:
+            log_data = log_path.read_text()
+        except OSError as e:
+            return {"error": f"failed to read session log: {e}"}
+        if len(log_data) > DEFAULT_MAX_LOG_BYTES:
+            log_data = log_data[-DEFAULT_MAX_LOG_BYTES:]
+        for line in log_data.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -196,3 +294,59 @@ def interactsh_poll(token: str) -> dict:
         count=len(interactions),
         note=note,
     ).model_dump()
+
+
+def interactsh_stop(token: str, delete_log: bool = True) -> dict:
+    """Stop a previously-registered interactsh-client session and clean up.
+
+    Terminates the spawned `interactsh-client` process (best-effort) and
+    removes the session descriptor. The log file is removed by default
+    (set `delete_log=False` to keep it for post-mortem).
+
+    Args:
+        token: token returned by `interactsh_register`.
+        delete_log: also remove the session log file (default True).
+
+    Returns:
+        {"stopped": bool, "log_removed": bool, "note": str | None}
+    """
+    if not _validate_token(token):
+        return {"error": "invalid token format (expected 12 hex chars from interactsh_register)"}
+
+    sp = _session_path(token)
+    if not sp.exists():
+        return {"error": f"unknown token: {token}"}
+
+    try:
+        session = json.loads(sp.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        return {"error": f"failed to read session: {e}"}
+
+    stopped = False
+    pid = session.get("pid")
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            stopped = True
+        except (ProcessLookupError, PermissionError, OSError):
+            stopped = False
+
+    log_removed = False
+    if delete_log:
+        log = Path(session.get("log_path", ""))
+        # Defense in depth: never unlink anything outside our sessions dir,
+        # even if a tampered session descriptor points elsewhere.
+        if log.exists() and _path_is_inside(log, SESSIONS_DIR):
+            try:
+                log.unlink()
+                log_removed = True
+            except OSError:
+                log_removed = False
+
+    sp.unlink(missing_ok=True)
+
+    return {
+        "stopped": stopped,
+        "log_removed": log_removed,
+        "note": None if stopped else "process already exited or no permission to signal",
+    }

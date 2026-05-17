@@ -11,11 +11,14 @@ For authorized testing only.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from typing import Literal
 
 from pydantic import BaseModel
+
+OPT_IN_ENV = "MCP_SECURITY_TOOLKIT_ENABLE_OFFENSIVE"
 
 ENCODINGS = ("raw", "base64", "url", "json", "soft")
 
@@ -50,6 +53,17 @@ def phpggc_generate(
         PhpggcReport with the generated payload (string). If `phpggc` is not
         installed, `available` is False.
     """
+    if os.environ.get(OPT_IN_ENV, "").lower() not in {"1", "true", "yes"}:
+        return {
+            "error": "offensive-tool-disabled",
+            "hint": (
+                f"This tool generates PHP deserialization payloads and is "
+                f"disabled by default. Set {OPT_IN_ENV}=1 in the MCP server's "
+                f"environment to enable. Only use against systems you are "
+                f"explicitly authorized to test."
+            ),
+        }
+
     if not isinstance(chain, str) or not chain.strip():
         return {"error": "chain must be a non-empty string"}
     if not isinstance(command, str) or not command.strip():
@@ -64,21 +78,23 @@ def phpggc_generate(
             stderr="phpggc binary not found on PATH — install from https://github.com/ambionics/phpggc",
         ).model_dump()
 
-    args: list[str] = [bin_path, f"-{encoding[0] if encoding != 'soft' else 's'}"]
-    if encoding == "raw":
-        args = [bin_path]
-    elif encoding == "base64":
-        args = [bin_path, "-b"]
+    args: list[str] = [bin_path]
+    if encoding == "base64":
+        args.append("-b")
     elif encoding == "url":
-        args = [bin_path, "-u"]
+        args.append("-u")
     elif encoding == "json":
-        args = [bin_path, "-j"]
+        args.append("-j")
     elif encoding == "soft":
-        args = [bin_path, "-s"]
+        args.append("-s")
+    # encoding == "raw" → no flag
     if fast_destruct:
         args.append("--fast-destruct")
     if extra_args:
         args.extend(str(a) for a in extra_args)
+    # `--` separates flags from positional args: prevents a `chain` value
+    # starting with `-` from being reinterpreted as a phpggc flag.
+    args.append("--")
     args.extend([chain, command])
 
     try:
