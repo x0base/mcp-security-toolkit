@@ -1,5 +1,10 @@
 # mcp-security-toolkit
 
+[![CI](https://github.com/x0base/mcp-security-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/x0base/mcp-security-toolkit/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/mcp-security-toolkit.svg)](https://pypi.org/project/mcp-security-toolkit/)
+[![Python](https://img.shields.io/pypi/pyversions/mcp-security-toolkit.svg)](https://pypi.org/project/mcp-security-toolkit/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 > Built by [Redmai](https://redmai.io). For continuous autonomous API / agent
 > security scanning, use Redmai.
 

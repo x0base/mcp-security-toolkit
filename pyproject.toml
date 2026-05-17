@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-security-toolkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Atomic MCP tools for AppSec and AI Security engineers"
 readme = "README.md"
 license = { text = "MIT" }
@@ -41,6 +41,21 @@ Issues = "https://github.com/x0base/mcp-security-toolkit/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_security_toolkit"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/mcp_security_toolkit",
+    "tests",
+    "scripts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "THREAT_MODEL.md",
+    "CONTRIBUTING.md",
+    "PLAN.md",
+    "pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 120
