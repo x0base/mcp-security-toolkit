@@ -16,28 +16,30 @@ in the coding agent you already use. Atomic, auditable, no orchestration.
 
 ## Why this exists
 
-Most MCP servers in the security space wrap a single CLI (Burp, Shodan,
-CyberChef, CVE feeds). They're useful, but the LLM/agent-security layer —
-the thing you care about when *your* code ships an LLM feature — is almost
-absent from the MCP ecosystem.
+Most security-flavored MCP servers wrap an existing CLI (Burp, Shodan,
+CyberChef) or audit MCP configurations and tool descriptions. The primitives
+a developer reaches for when *their own* code ships an LLM feature —
+source-level audit of an MCP server, schema-level audit of an agent tool,
+static review of a system prompt — are thinly covered.
 
-`mcp-security-toolkit` fills that gap. The headline tools below have **no
-existing MCP equivalent**. The convenience atoms are bundled so you can run
-one server instead of five.
+`mcp-security-toolkit` ships those primitives, plus the everyday pentest
+atoms an agent reaches for during AppSec work, so you can run one server
+instead of five.
 
 ---
 
-## Headline tools (LLM & agent security)
+## Headline tools
 
 ### `mcp_server_audit`
-AST-based source SAST for MCP server implementations. Enumerates
+Heuristic AST audit of an MCP server's Python source. Enumerates
 `@tool`-decorated and imperatively-registered tools, then flags:
 shell execution, filesystem writes, network egress, code injection,
 over-broad parameter types, ambiguous/short descriptions, secrets read
-from env.
+from env. Tracks `from X import Y [as Z]` aliases so renamed dangerous
+imports don't slip through.
 
-Differs from Snyk / Invariant Labs `mcp-scan`, which audits configs and
-tool descriptions — this audits the *source code* of the server.
+Complements Snyk / Invariant Labs `mcp-scan`, which audits MCP configs
+and tool descriptions — this audits the *source code* of the server.
 
 ### `agent_tool_risk_audit`
 Takes a single agent tool's JSON schema and reports schema-level risks:
@@ -84,6 +86,104 @@ tool is one input → one output, no chaining.
 - `interactsh_register` / `interactsh_poll` — wraps `interactsh-client`
   CLI for OOB callback URL capture (blind SSRF / XXE / RCE confirmation)
 
+## Example output
+
+Real output from three of the headline tools. Click to expand.
+
+<details>
+<summary><b><code>mcp_server_audit</code></b> on a deliberately-bad fixture — finds <code>subprocess.run</code> shell-exec, over-broad <code>path: str</code> params, missing docstring, fs-write, and a secret read from env.</summary>
+
+```json
+{
+  "file": "sample_mcp_server.py",
+  "tools_found": 4,
+  "summary": {"high": 1, "medium": 5, "low": 1, "info": 1},
+  "tools": [
+    { "name": "safe_echo", "findings": [] },
+    {
+      "name": "run_cmd",
+      "findings": [
+        {"category": "ambiguous-description", "severity": "low",
+         "message": "docstring is very short (4 chars) — risk of LLM misuse"},
+        {"category": "over-broad-param", "severity": "medium",
+         "message": "parameter `cmd`: command-like parameter typed as bare `str`"},
+        {"category": "shell-exec", "severity": "high",
+         "message": "calls `subprocess.run`"}
+      ]
+    },
+    {
+      "name": "read_anything",
+      "findings": [
+        {"category": "ambiguous-description", "severity": "medium",
+         "message": "tool has no docstring — the LLM cannot reason about when to use it"},
+        {"category": "over-broad-param", "severity": "medium",
+         "message": "parameter `path`: path-like parameter typed as bare `str` (no allow-list)"}
+      ]
+    },
+    {
+      "name": "write_log",
+      "findings": [
+        {"category": "over-broad-param", "severity": "medium",
+         "message": "parameter `path`: path-like parameter typed as bare `str` (no allow-list)"},
+        {"category": "fs-write", "severity": "medium",
+         "message": "opens file for writing (mode='a')"}
+      ]
+    }
+  ],
+  "file_level_findings": [
+    {"category": "secret-in-env", "severity": "info",
+     "message": "reads secret from env `SECRET_API_KEY` — ensure it is documented in README and never logged"}
+  ]
+}
+```
+</details>
+
+<details>
+<summary><b><code>agent_tool_risk_audit</code></b> on a tool schema with bare-string <code>cmd</code> / <code>url</code>, a URL+data exfil shape, and <code>verify_ssl: false</code>.</summary>
+
+```json
+{
+  "tool_name": "shell_exec",
+  "detected_format": "mcp",
+  "findings": [
+    {"category": "ambiguous-description", "severity": "medium", "path": "<tool>",
+     "message": "description is very short (5 chars) — high risk of LLM misuse"},
+    {"category": "risky-name-vague-desc", "severity": "medium", "path": "<tool>",
+     "message": "tool name suggests it executes ('exec') but description is brief — agent may misuse"},
+    {"category": "over-broad-param", "severity": "high", "path": "cmd",
+     "message": "command-like param `cmd` is bare string — agent can execute arbitrary commands"},
+    {"category": "over-broad-param", "severity": "high", "path": "url",
+     "message": "url-like param `url` is bare string with no `pattern` — agent can reach arbitrary hosts (SSRF / exfil)"},
+    {"category": "dangerous-default", "severity": "medium", "path": "verify_ssl",
+     "message": "safety-related param `verify_ssl` defaults to `False` — disables a safeguard by default"},
+    {"category": "exfil-shape", "severity": "medium", "path": "<tool>",
+     "message": "tool accepts both a URL-like destination and a data-like payload — classic exfil shape"}
+  ]
+}
+```
+</details>
+
+<details>
+<summary><b><code>jwt_inspect</code></b> on the well-known <code>jwt.io</code> default token — verifies signature against a small weak-secret dictionary, finds missing claims.</summary>
+
+```json
+{
+  "valid_structure": true,
+  "header": {"alg": "HS256", "typ": "JWT"},
+  "payload": {"sub": "1234567890", "name": "John Doe", "iat": 1516239022},
+  "weak_secret": "your-256-bit-secret",
+  "findings": [
+    {"category": "missing-claim", "severity": "medium",
+     "message": "no `exp` claim — token never expires"},
+    {"category": "missing-claim", "severity": "low", "message": "no `iss` claim"},
+    {"category": "missing-claim", "severity": "low", "message": "no `aud` claim"},
+    {"category": "weak-secret", "severity": "high",
+     "message": "signature verifies with common weak secret: 'your-256-bit-secret'"}
+  ]
+}
+```
+</details>
+
 ## Recommended companion MCP servers
 
 For deeper coverage in adjacent areas we explicitly recommend (and do not
@@ -91,17 +191,12 @@ duplicate):
 
 - [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server) — Burp Suite
 - [ChromeDevTools/chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) — Chrome DevTools
-- [invariantlabs-ai/mcp-scan](https://github.com/invariantlabs-ai/mcp-scan) — MCP config / tool-description audit (complementary to our source SAST)
+- [invariantlabs-ai/mcp-scan](https://github.com/invariantlabs-ai/mcp-scan) — MCP config / tool-description audit (complementary to our source-level audit)
 - [mukul975/cve-mcp-server](https://github.com/mukul975/cve-mcp-server) — full 27-tool CVE intelligence server
 
 ---
 
-## Release status
-
-13 tools shipped across v0.1 (LLM/agent security + appsec primitives) and
-v0.2 (pentest pack). See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
-
-## Install (planned PyPI release)
+## Install
 
 ```bash
 pip install mcp-security-toolkit
@@ -132,32 +227,14 @@ calls two of them):
 python scripts/smoke_mcp.py
 ```
 
-## How this connects to Redmai
-
-These tools are the **atomic primitives**. They do one thing: request → response,
-no orchestration, no state, no decision-making.
-
-**[Redmai](https://redmai.io)** is what wields them autonomously in production:
-
-```
-OpenAPI spec  ─▶  attack-case generation  ─▶  execution  ─▶
-              ─▶  kill-chain narrative   ─▶  remediation report
-```
-
-Plus scan history, industry-specific rule packs (fintech, healthcare,
-e-commerce), enterprise SSO, and SLA-backed hosted scanning.
-
-If you like what these primitives do and want them running themselves —
-that's Redmai.
-
-This toolkit will never grow orchestration, chaining, or decision-making.
-That line stays clean on purpose.
-
 ## Non-goals
 
-- No orchestration, decision engines, or auto-exploit chains. **Atomic only.**
-- No wrappers around standalone web-pentest CLIs (sqlmap, ghauri, dalfox).
-- No novel jailbreak research — defensive framing only.
+- No orchestration, chaining, or decision logic across tools — primitives only.
+- No reimplementation of full-featured offensive CLIs (`sqlmap`, `ghauri`,
+  `dalfox`); where wrapping a small, focused CLI is a natural fit
+  (`phpggc`, `interactsh-client`), we wrap it directly with a graceful
+  "binary not found" path.
+- No novel offensive research — all referenced techniques cite public sources.
 
 ## License
 
