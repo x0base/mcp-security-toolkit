@@ -43,11 +43,11 @@ Heuristic AST audit of an MCP server's Python source. Enumerates
 | Over-broad params | `over-broad-param` | medium |
 | Ambiguous/missing docstring | `ambiguous-description` | low–med |
 | Secret read from env | `secret-in-env` | info |
-| **Path traversal** (v0.4) | `path-traversal` | high |
-| **Prompt injection in docstring** (v0.4) | `tool-description-injection` | medium |
-| **SSRF via URL param** (v0.4) | `ssrf` | high |
-| **Resource URI → SQL injection** (v0.4) | `mcp-resource-uri-sqli` | high |
-| **Tool shadowing** (v0.4) | `tool-shadowing` | medium |
+| Path traversal | `path-traversal` | high |
+| Prompt injection in docstring | `tool-description-injection` | medium |
+| SSRF via URL param | `ssrf` | high |
+| Resource URI → SQL injection | `mcp-resource-uri-sqli` | high |
+| Tool shadowing (cross-tool) | `tool-shadowing` | medium |
 
 Tracks `from X import Y [as Z]` aliases so renamed dangerous imports
 don't slip through. Reports include a `coverage.detectors_run` list and

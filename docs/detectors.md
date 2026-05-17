@@ -1,179 +1,238 @@
-# v0.4 detectors — engineering brief
+# `mcp_server_audit` — detector reference
 
-**Audience:** dev-team agents (lead → scout → builder cycle).
-**Scope:** add four new detectors to `mcp_server_audit` covering MCP-specific bug classes that the current v0.3 implementation misses.
-**Motivation:** during a 2026-05-17 CVE hunt, two confirmed path-traversal CVE-candidates (Office-Word-MCP-Server, Office-PowerPoint-MCP-Server, ~3,700 combined ⭐) were found, but neither was flagged by `mcp_server_audit` because we lack a path-traversal detector. The Damn Vulnerable MCP corpus (`harishsg993010/damn-vulnerable-MCP-server`) confirms gaps in three additional classes.
+Per-detector heuristic, severity, rationale, and fixture references for
+every rule that `mcp_server_audit` runs against a Python MCP server's
+source. SARIF reports emitted by the audit link here via `helpUri`
+(`docs/detectors.md#<rule-id>`).
 
-This brief defines the four detectors and the test fixtures that block merge.
+All detectors below are part of `coverage.detectors_run`. Heuristic
+SAST — false negatives are expected. Absence of a finding is NOT proof
+of safety; see the `limitations` block in every report.
 
----
-
-## D1 — `path-traversal`
-
-**Severity:** high (`severity: "high"`).
-**Category string:** `path-traversal`.
-
-### Heuristic
-
-A `@tool`-registered function is flagged if **all three** hold:
-
-1. **Parameter shape.** Function has at least one parameter whose name (lower-case) matches the regex `^(filename|file_path|filepath|path|output_path|output_filename|image_path|src_path|dst_path|source|destination|target|input_path|save_path)$`.
-2. **Sink usage.** The function body uses that parameter (by name) as an argument to any of: `open(`, `Path(`, `pathlib.Path(`, `os.path.*(` (any), `Document(`, `Presentation(`, `shutil.copy*(`, `shutil.move(`, `shutil.rmtree(`, `subprocess.run(`, `subprocess.Popen(`, `os.makedirs(`, `os.remove(`, `os.unlink(`, `os.rename(`.
-3. **Validation absence.** The function body does **NOT** contain any of: `.resolve()`, `.relative_to(`, `os.path.commonpath(`, `_path_is_inside(`, `is_safe_path(`, `secure_filename(`, an explicit reject of `..` in the parameter, or an explicit anchor against a configured root constant (heuristic: appearance of any UPPER_CASE name matching `^[A-Z_]+(ROOT|DIR|BASE|HOME)$` adjacent to the parameter).
-
-### Implementation hint
-
-Walk the function's AST. Build a set of `target_params` from parameter names matching the regex. For each `ast.Call` in the body, check whether any arg ASTs reference a `target_param` (by `ast.Name` id). Also collect the set of method names called on those params. Apply rule 3 as a negation check on the function body's calls.
-
-### Rationale
-
-This is the highest-value detector — it would have caught both Office-Word-MCP-Server and Office-PowerPoint-MCP-Server in the recent hunt.
-
-### Test fixtures
-
-- **Positive:** `damn-vulnerable-MCP-server/challenges/easy/challenge3/server.py` (`read_file` tool).
-- **Positive:** `damn-vulnerable-MCP-server/challenges/medium/challenge6/server.py` (`upload_and_process_document`).
-- **Negative:** `mcp-security-toolkit/src/mcp_security_toolkit/tools/interactsh.py` (`interactsh_poll` — has `_path_is_inside` check, must NOT flag).
+The MCP-specific detectors (path-traversal, tool-description-injection,
+ssrf, mcp-resource-uri-sqli, tool-shadowing) shipped in **v0.3.0**.
+They were introduced after a 2026-05-17 CVE hunt found two
+path-traversal CVE candidates in popular MCP servers (Office-Word and
+Office-PowerPoint MCP servers, ~3,700 combined ⭐) that the earlier
+generic detector set did not catch.
 
 ---
 
-## D2 — `tool-description-injection`
+## shell-exec
 
-**Severity:** medium (`severity: "medium"`).
-**Category string:** `tool-description-injection`.
+**Severity:** high
 
-### Heuristic
+Flags calls into `subprocess.{run,call,Popen,check_output,check_call}`,
+`os.{system,popen,exec*,spawn*}` from inside a `@tool`-registered
+function. Tracks `from subprocess import run [as r]` aliases so renamed
+dangerous imports don't slip through.
 
-A `@tool`-registered function is flagged if its docstring contains **any** of:
-
-1. **HTML/XML-style injection tags**, case-insensitive: `<IMPORTANT>`, `<SYSTEM>`, `<ADMIN>`, `<URGENT>`, `<SECRET>`, `<INSTRUCTION>`, `<HIDDEN>`, `<DO_NOT_DISPLAY>`.
-2. **Imperative override phrases**, case-insensitive (full-word match):
-   - `IGNORE PREVIOUS`
-   - `DISREGARD INSTRUCTIONS`
-   - `DO NOT MENTION`
-   - `DO NOT TELL`
-   - `ALWAYS INCLUDE`
-   - `ALWAYS USE`
-   - `MUST ACCESS`
-   - `BEFORE RESPONDING`
-   - `PRETEND`
-3. **Cross-resource invocation markers**: docstring claims another resource/tool must be silently fetched (regex `access(?:ing)?\s+(?:the\s+)?resource\s+at|silently\s+(?:fetch|read|call)`).
-
-### Implementation hint
-
-Walk AST for `FunctionDef` nodes with `@tool` decorators. Grab `ast.get_docstring(node)`. Run the patterns. Emit a single finding per matched tool with a `matches` array.
-
-### Rationale
-
-DVMP challenge 2 is the canonical example: hidden `<IMPORTANT>` block telling the LLM to fetch a "confidential" resource silently. This is the classic "tool poisoning" pattern called out by OWASP LLM Top 10 (LLM06: Sensitive Information Disclosure / LLM08: Excessive Agency).
-
-### Test fixtures
-
-- **Positive:** `damn-vulnerable-MCP-server/challenges/easy/challenge2/server.py` (`get_company_data` — `<IMPORTANT>` block).
-- **Negative:** any of our own tools (`graphql_introspect`, `jwt_inspect`, etc.).
+**Fix:** never accept a shell command from an agent. If you must run
+an external process, build the `args` list yourself (no `shell=True`)
+and validate every value against an allow-list.
 
 ---
 
-## D3 — `ssrf`
+## fs-write / fs-destructive
 
-**Severity:** high (`severity: "high"`).
-**Category string:** `ssrf`.
+**Severity:** medium (`fs-write`) / high (`fs-destructive`)
 
-### Heuristic
+`fs-write` fires when a `@tool` function opens a file with a write
+mode (`'w'`, `'a'`, `'x'`). `fs-destructive` fires on
+`shutil.rmtree` / `os.remove` / `os.unlink`.
 
-A `@tool`-registered function is flagged if **all** hold:
-
-1. **Parameter shape.** Has at least one parameter named `url`, `uri`, `endpoint`, `target_url`, `webhook_url`, `callback_url`, `link`, `host`, `target`.
-2. **Sink usage.** Function body passes that parameter to any of: `urllib.request.urlopen(`, `urlopen(`, `requests.get(`, `requests.post(`, `requests.put(`, `requests.delete(`, `requests.request(`, `httpx.get(`, `httpx.post(`, `httpx.AsyncClient(`, `aiohttp.ClientSession(`.
-3. **Validation absence.** Function body does NOT contain any of: `_is_private_address(`, `ipaddress.ip_address(`, `is_global`, host-allowlist check (heuristic: `in ALLOWED_` constant or `host in `), scheme allow-list check that rejects `file://` / `gopher://` / `ftp://` (heuristic: a comparison like `scheme not in ('http', 'https')` or `startswith('http')`).
-
-### Implementation hint
-
-Mirror D1's AST walk. We already implemented the validation pattern in `graphql_introspect.py` (`_is_private_address`) — use that as the "good shape" reference.
-
-### Test fixtures
-
-- **Positive:** craft a minimal fixture in `tests/fixtures/ssrf_positive.py` — a tool that takes `url` and passes to `requests.get(url)` with no guard.
-- **Negative:** `mcp-security-toolkit/src/mcp_security_toolkit/tools/graphql_introspect.py` (has the preflight).
+**Fix:** wrap the path in `safe_path(name, root=...)` from
+`mcp_security_toolkit.helpers` so writes/deletes are constrained to a
+directory the tool owns.
 
 ---
 
-## D4 — `mcp-resource-uri-sqli`
+## network-egress
 
-**Severity:** high (`severity: "high"`).
-**Category string:** `mcp-resource-uri-sqli`.
+**Severity:** medium
 
-### Heuristic
+Flags outbound HTTP calls via `requests.{get,post,request}`,
+`httpx.{get,post}`, `urllib.request.urlopen` from inside a `@tool`.
 
-For each function decorated with `@app.read_resource`, `@server.read_resource`, `@mcp.resource(...)`, or `@app.resource(...)`:
-
-1. Track variables assigned from `<param>.split(`, `<param>[N:]`, `<param>.removeprefix(`, `urlparse(<param>)` where `<param>` is a function arg (typically `uri`).
-2. If any such derived variable is interpolated into an f-string or `.format()` that becomes an argument to `.execute(`, `.executemany(`, `.execute_many(`, `cursor.execute*(`, `conn.execute(`, `engine.execute(`, flag.
-
-### Rationale
-
-`designcomputer/mysql_mcp_server`'s `read_resource` pattern. Not in DVMP, so we'll add a minimal fixture.
-
-### Test fixtures
-
-- **Positive:** add `tests/fixtures/mcp_uri_sqli.py` modeling the mysql_mcp_server pattern. (Do NOT use the real mysql_mcp_server source — it's a private pre-disclosure target.)
-- **Negative:** any resource handler that uses parameterized queries.
+**Fix:** if the destination is user-controlled, validate via
+`safe_url(url)` (blocks private / loopback / metadata addresses by
+default) before fetching.
 
 ---
 
-## Cross-cutting requirements
+## code-injection
 
-### File locations
-- All four detectors live in `src/mcp_security_toolkit/tools/mcp_server_audit.py`, registered the same way as existing detectors (`_analyze_function` and `_collect_file_level_findings`).
-- Test fixtures in `tests/fixtures/v0_4/`.
-- Tests in `tests/test_mcp_server_audit.py` (extend, do not split into a new file).
+**Severity:** high
 
-### Coverage block
-The `Coverage` model gets a new field `detectors_run: list[str]` enumerating which detectors actually executed. Update `limitations` text to reference the new detectors.
+Flags `eval()`, `exec()`, `compile()` inside a `@tool`. Almost always
+a critical bug when the argument is derived from agent input.
 
-### CLI / API surface
-No breaking changes. Detectors are always on. Future enhancement (out of scope): `--rules` flag to enable/disable individual detectors.
-
-### Configurability
-None for v0.4. Hardcoded patterns. We tune them based on real findings during the next hunt batch.
-
-### CHANGELOG / version
-- Bump `pyproject.toml` and `__init__.py` to `0.4.0`.
-- CHANGELOG section `## [0.4.0] — MCP-specific detectors`.
-
-### Quality gates (must pass before merge)
-- `bun test` (we use pytest, but CLAUDE.md convention) → `python -m pytest -q`
-- `ruff check src/ tests/`
-- `mypy src/`
-- ≥1 positive + ≥1 negative fixture per detector with assertions.
-
-### Acceptance criteria
-- Running v0.4 against `damn-vulnerable-MCP-server` flags **at least** challenges 2 (`tool-description-injection`), 3 (`path-traversal`), 6 (`path-traversal`), 9 (`shell-exec`, already covered).
-- Running v0.4 against the v0.3 self-tests does NOT produce regressions (existing fixture expectations still hold).
-- README updated to list the new detectors in the "What we catch" section.
+**Fix:** for arithmetic / formula input, use
+`evaluate_expression(expr, variables=...)` from
+`mcp_security_toolkit.helpers`. For anything else, parse your own
+DSL — never `eval`.
 
 ---
 
-## Out of scope for v0.4
+## over-broad-param
 
-- SARIF export.
-- GitHub Actions workflow template.
-- `--rules` enable/disable flag.
-- AST recursion-limit hardening (already shipped in v0.3).
-- Detector autofix suggestions.
+**Severity:** medium
 
-These go into a v0.5 backlog.
+Flags a `@tool` parameter whose name suggests a path / command / URL
+but whose annotation is a bare type (`str`, `dict`, `list`, `Any`,
+`object`) with no validator or `Literal` constraint. The agent will
+pass anything; the tool will accept anything.
+
+**Fix:** add `Literal["..."]` or a Pydantic model with `pattern` /
+`enum`; or validate inside the tool using the relevant `helpers.safe_*`
+function.
 
 ---
 
-## Branch / PR plan
+## ambiguous-description
 
-Suggested split (one PR per detector keeps review tractable):
+**Severity:** low–medium
 
-1. `feat/d1-path-traversal` — implementation + tests + fixtures.
-2. `feat/d2-tool-description-injection` — same.
-3. `feat/d3-ssrf` — same.
-4. `feat/d4-mcp-resource-uri-sqli` — same.
-5. `chore/v0.4-release` — version bump, CHANGELOG, README, docs/v0.4-detectors-spec.md → mark spec as DONE.
+Fires when a `@tool` has no docstring (medium) or a docstring shorter
+than 40 chars (low). An LLM relies on the docstring to decide when to
+call the tool; a missing / vague one is a misuse vector.
 
-Each PR small enough to review in 15 minutes. Each generates one Pull Shark increment.
+**Fix:** write a one-paragraph docstring that states what the tool
+does, what inputs it accepts, and what it returns.
+
+---
+
+## secret-in-env
+
+**Severity:** info
+
+Module-level finding. Flags `os.getenv("…KEY…" / "…TOKEN…" /
+"…SECRET…" / "…PASSWORD…")` so the audit report doubles as a
+secret-handling inventory.
+
+**Fix:** documentation only — make sure secret-bearing env vars are
+named, documented in your README, never echoed in logs, and never
+returned from tool output.
+
+---
+
+## path-traversal
+
+**Severity:** high
+
+Flags a `@tool`-registered function when **all three** hold:
+
+1. **Parameter shape.** At least one parameter whose name matches
+   `^(filename|file_path|filepath|path|output_path|output_filename|image_path|src_path|dst_path|source|destination|target|input_path|save_path)$`
+2. **Use shape.** The parameter is passed to `Path()` / `open()` /
+   `os.path.join` and the result reaches a side-effecting call
+   (`.write_text`, `.read_text`, `open(..., 'w'/'a'/'x')`,
+   `shutil.copy*`, `os.makedirs`).
+3. **No sanitization in the same function.** No call to
+   `safe_path` / `safe_filename` / `Path.resolve().relative_to(...)` /
+   `Path.is_relative_to(...)` / `os.path.commonpath` between the
+   parameter and its use.
+
+**Fix:** import `safe_path` (or `safe_filename` if the parameter is a
+filename joined to a fixed root inside the tool) and apply it as the
+first statement of the tool function.
+
+**Fixtures:** `tests/fixtures/v0_4/path_traversal_positive.py`,
+`tests/fixtures/v0_4/path_traversal_negative.py`.
+
+---
+
+## tool-description-injection
+
+**Severity:** medium
+
+Flags a `@tool` whose docstring contains text that looks like an
+instruction to a model rather than documentation: phrases like *"ignore
+previous instructions"*, *"you are now…"*, *"system:"*, *"<|im_start|>"*,
+imperative second-person commands directed at the model
+(*"as the assistant, you must…"*).
+
+A docstring is in the model's context window whenever the tool is
+exposed. Hostile docstrings (e.g. from a third-party MCP server an
+agent imports) are an indirect prompt-injection vector.
+
+**Fix:** keep docstrings descriptive, not imperative-to-the-model.
+Describe what the tool does and its arguments. If you must include
+literal text that would otherwise trigger this, quote it in code
+fences and clarify intent.
+
+**Fixture:** `tests/fixtures/v0_4/tool_desc_injection_positive.py`.
+
+---
+
+## ssrf
+
+**Severity:** high
+
+Flags a `@tool` when **both** hold:
+
+1. A parameter whose name suggests a URL / endpoint / host
+   (`url`, `endpoint`, `target`, `host`, `webhook`, `callback`, `uri`).
+2. The parameter is passed to an outbound HTTP call
+   (`requests.*`, `httpx.*`, `urllib.request.urlopen`, `aiohttp.*`)
+   without `safe_url` / equivalent allow-list / private-IP check
+   between parameter and call.
+
+**Fix:** wrap with `safe_url(url, allow_private=False)` (blocks
+private / loopback / link-local / metadata addresses by default).
+
+**Fixtures:** `tests/fixtures/v0_4/ssrf_positive.py`,
+`tests/fixtures/v0_4/ssrf_negative.py`.
+
+---
+
+## mcp-resource-uri-sqli
+
+**Severity:** high
+
+Flags `@read_resource`-decorated handlers (and equivalents) that
+unpack a URI's path components and interpolate one of them into an
+SQL string. The MCP `@read_resource("db://{table}/{id}")` pattern
+makes URI components feel like trusted "routes," but they're agent
+input — interpolating into SQL is classic injection.
+
+**Fix:** use `safe_sql_identifier(name, allow={...})` for table /
+column names that **must** be interpolated; use parameterized queries
+(`cursor.execute(sql, (value,))`) for values.
+
+**Fixtures:** `tests/fixtures/v0_4/mcp_uri_sqli_positive.py`,
+`tests/fixtures/v0_4/mcp_uri_sqli_negative.py`.
+
+---
+
+## tool-shadowing (cross-tool, file-level)
+
+**Severity:** medium
+
+Module-level finding. Fires when two `@tool`-registered functions in
+the same server have very similar names (edit-distance ratio ≥ 0.8)
+or very similar docstrings. LLMs are sensitive to small wording
+differences — two near-duplicate tools mean the model may invoke
+whichever one the agent thinks is right, possibly the wrong one.
+
+**Fix:** rename one tool to make the distinction load-bearing; or
+collapse the two into a single tool with a `mode` parameter.
+
+**Fixture:** `tests/fixtures/v0_4/tool_shadowing_positive.py`.
+
+---
+
+## Reading a SARIF report from `mcp_server_audit`
+
+Each finding's `ruleId` corresponds to a section above. Severity
+maps to SARIF `level`:
+
+| Audit severity | SARIF level |
+|---|---|
+| high | `error` |
+| medium | `warning` |
+| low / info | `note` |
+
+`mcp_security_toolkit.sarif.to_sarif(report)` emits SARIF 2.1.0.
+Upload via `github/codeql-action/upload-sarif` to populate the
+Security tab.
