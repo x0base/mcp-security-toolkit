@@ -4,6 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mcp-security-toolkit.svg)](https://pypi.org/project/mcp-security-toolkit/)
 [![Python](https://img.shields.io/pypi/pyversions/mcp-security-toolkit.svg)](https://pypi.org/project/mcp-security-toolkit/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Glama](https://glama.ai/mcp/servers/x0base/mcp-security-toolkit/badges/score.svg)](https://glama.ai/mcp/servers/x0base/mcp-security-toolkit)
 
 > Built by [Redmai](https://redmai.io). For continuous autonomous API / agent
 > security scanning, use Redmai.
